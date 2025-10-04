@@ -9,11 +9,16 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/random.h> 
+#include <linux/poll.h>
+
 #include "nxp_simtemp.h"
 
 #define DEVICE_NAME "simtemp"
 #define FIFO_SIZE 128 //number of samples
 #define DEFAULT_PERIOD_MS 100
+
+#define SAMPLE_FLAG_NEW   0x01
+#define SAMPLE_FLAG_ALERT 0x02
 
 // Global Variables
 static DECLARE_KFIFO(sample_fifo, struct simtemp_sample, FIFO_SIZE);
@@ -21,6 +26,8 @@ static struct hrtimer simtemp_timer;
 static struct work_struct simtemp_work;
 static wait_queue_head_t read_wq;
 static DEFINE_MUTEX(fifo_lock);
+static int threshold_mC = 45000; 
+static atomic_t alert_pending = ATOMIC_INIT(0);
 
 static unsigned int sampling_ms = DEFAULT_PERIOD_MS;
 
@@ -28,13 +35,22 @@ static void simtemp_generate_sample(struct work_struct *work){
     struct simtemp_sample s;
     s.timestamp_ns = ktime_get_ns();
     s.temp_mC = 40000 + (get_random_u32() % 10000); // between 40 - 49°C
-    s.flags = 1;
+    s.flags = SAMPLE_FLAG_NEW;
+
+    if (s.temp_mC <= threshold_mC){
+        s.flags |= SAMPLE_FLAG_ALERT;
+        atomic_set(&alert_pending, 1);
+    }
 
     mutex_lock(&fifo_lock);
     if (!kfifo_is_full(&sample_fifo)){
         kfifo_in(&sample_fifo, &s, 1);
         wake_up_interruptible(&read_wq);
+    } else if (s.flags & SAMPLE_FLAG_ALERT)
+    {
+        wake_up_interruptible(&read_wq);
     }
+    
     mutex_unlock(&fifo_lock);
 }
 
@@ -53,15 +69,18 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     struct simtemp_sample sample;
     size_t size = sizeof(sample);
 
-    if (count < size) 
+    if (count < size) {
         return -EINVAL;
+    }
     
     if (kfifo_is_empty(&sample_fifo)){
-        if (file->f_flags & O_NONBLOCK)
+        if (file->f_flags & O_NONBLOCK){
             return -EAGAIN;
+        }
         //blocking read
-        if (wait_event_interruptible(read_wq, !kfifo_is_empty(&sample_fifo)))
+        if (wait_event_interruptible(read_wq, !kfifo_is_empty(&sample_fifo))){
             return -ERESTARTSYS;
+        }
     }
 
     mutex_lock(&fifo_lock);
@@ -71,16 +90,37 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     }
     mutex_unlock(&fifo_lock);
 
-    if (copy_to_user(buf, &sample, size))
-        return -EFAULT;
+    if (sample.flags & SAMPLE_FLAG_ALERT){
+        atomic_set(&alert_pending, 0);
+    }
 
+    if (copy_to_user(buf, &sample, size)){
+        mutex_unlock(&fifo_lock);
+        return -EFAULT;
+    }
     return size;
     
 };
 
+static __poll_t simtemp_poll(struct file *file, poll_table *wait){
+    __poll_t mask = 0;
+    poll_wait(file, &read_wq, wait);
+
+    if (!kfifo_is_empty(&sample_fifo)){
+        mask |= POLLIN | POLLRDNORM;
+    }
+    if (atomic_read(&alert_pending)){
+        mask |= POLLPRI | POLLERR;
+    }
+    return mask;
+}
+
+
+
 static const struct file_operations simtemp_fops = {
     .owner = THIS_MODULE,
     .read = simtemp_read,
+    .poll = simtemp_poll,
 };
 
 /* Device */
