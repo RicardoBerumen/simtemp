@@ -1,5 +1,4 @@
-obj-m := nxp_simtemp.o
-
+include Kbuild
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)
 
