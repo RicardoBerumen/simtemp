@@ -3,7 +3,12 @@
 
 #include <linux/types.h>
 
-
+/* --- Modes --- */
+enum simtemp_mode {
+    MODE_NORMAL = 0,
+    MODE_NOISY,
+    MODE_RAMP,
+};
 
 /* --- Sample struct returned to user --- */
 struct simtemp_sample {

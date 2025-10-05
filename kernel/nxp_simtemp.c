@@ -26,19 +26,52 @@ static struct hrtimer simtemp_timer;
 static struct work_struct simtemp_work;
 static wait_queue_head_t read_wq;
 static DEFINE_MUTEX(fifo_lock);
-static int threshold_mC = 45000; 
+static int threshold_mC = 45000;
+//static int sampling_ms = 1000; 
 static atomic_t alert_pending = ATOMIC_INIT(0);
+static enum simtemp_mode mode = MODE_NORMAL;
+
+
+static atomic64_t updates = ATOMIC64_INIT(0);
+static atomic64_t alerts = ATOMIC64_INIT(0);
+static atomic64_t errors = ATOMIC64_INIT(0);
 
 static unsigned int sampling_ms = DEFAULT_PERIOD_MS;
 
+static struct timer_list sample_timer;
+
 static void simtemp_generate_sample(struct work_struct *work){
     struct simtemp_sample s;
+    static int ramp_val = 40000;
     s.timestamp_ns = ktime_get_ns();
-    s.temp_mC = 40000 + (get_random_u32() % 10000); // between 40 - 49°C
+
+    switch (mode)
+    {
+    case MODE_NORMAL:
+        s.temp_mC = 40000 + (get_random_u32() % 10000); // between 40 - 49°C
+        break;
+    case MODE_NOISY:
+        s.temp_mC = 20000 + (get_random_u32() % 40000); // between 20 - 59°C
+        break;
+    case MODE_RAMP:
+        s.temp_mC = ramp_val;
+        ramp_val += 500;
+        if (ramp_val > 50000){
+            ramp_val = 40000;
+        }
+        break;
+    default:
+        s.temp_mC = 40000 + (get_random_u32() % 10000); // between 40 - 49°C
+        break;
+    }
+    //s.temp_mC = 40000 + (get_random_u32() % 10000); // between 40 - 49°C
+    
     s.flags = SAMPLE_FLAG_NEW;
+    atomic64_inc(&updates);
 
     if (s.temp_mC <= threshold_mC){
         s.flags |= SAMPLE_FLAG_ALERT;
+        atomic64_inc(&alerts);
         atomic_set(&alert_pending, 1);
     }
 
@@ -52,6 +85,7 @@ static void simtemp_generate_sample(struct work_struct *work){
     }
     
     mutex_unlock(&fifo_lock);
+    mod_timer(&sample_timer, jiffies + msecs_to_jiffies(sampling_ms));
 }
 
 static enum hrtimer_restart simtemp_timer_fn(struct hrtimer *t){
@@ -59,6 +93,75 @@ static enum hrtimer_restart simtemp_timer_fn(struct hrtimer *t){
     hrtimer_forward_now(t, ms_to_ktime(sampling_ms));
     return HRTIMER_RESTART;
 }
+
+//Sysfs show/store helpers
+static ssize_t sampling_ms_show(struct device *dev, struct device_attribute *attr, char *buf){
+    return sprintf(buf, "%d\n", sampling_ms);
+}
+
+static ssize_t sampling_ms_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count){
+    int val;
+    if (kstrtoint(buf, 10, &val)){
+        return -EINVAL;
+    }
+    if (val < 10 || val > 10000){
+        return -EINVAL;
+    }
+    sampling_ms = val;
+    return count;
+}
+
+static DEVICE_ATTR_RW(sampling_ms);
+
+static ssize_t threshold_mC_show(struct device *dev, struct device_attribute *attr, char *buf){
+    return sprintf(buf, "%d\n", threshold_mC);
+}
+static ssize_t threshold_mC_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count){
+    int val;
+    if (kstrtoint(buf, 10, &val)){
+        return -EINVAL;
+    }
+    if (val < 10 || val > 10000){
+        return -EINVAL;
+    }
+    threshold_mC = val;
+    return count;
+}
+
+static DEVICE_ATTR_RW(threshold_mC);
+
+static ssize_t mode_show(struct device *dev,
+                         struct device_attribute *attr, char *buf)
+{
+    const char *m = "normal";
+    if (mode == MODE_NOISY) m = "noisy";
+    else if (mode == MODE_RAMP) m = "ramp";
+    return sprintf(buf, "%s\n", m);
+}
+
+static ssize_t mode_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count){
+    if (sysfs_streq(buf, "normal")){
+        mode = MODE_NORMAL;
+    }
+    else if (sysfs_streq(buf, "noisy")){
+        mode = MODE_NOISY;
+    }
+    else if (sysfs_streq(buf, "ramp")){
+        mode = MODE_RAMP;
+    }
+    else {
+        return -EINVAL;
+    }
+    return count;
+}
+
+static DEVICE_ATTR_RW(mode);
+
+static ssize_t stats_show(struct device *dev, struct device_attribute *attr, char *buf){
+    return sprintf(buf, "updates=%lld\nalerts=%lld\nerrors=%lld\n", atomic64_read(&updates), atomic64_read(&alerts), atomic64_read(&errors));
+}
+
+static DEVICE_ATTR_RO(stats);
 
 
 
@@ -131,12 +234,28 @@ static struct miscdevice simtemp_dev = {
     .mode = 0666,
 };
 
+static struct attribute *simtemp_attrs[] = {
+    &dev_attr_sampling_ms.attr,
+    &dev_attr_threshold_mC.attr,
+    &dev_attr_mode.attr,
+    &dev_attr_stats.attr,
+    NULL,
+};
+
+ATTRIBUTE_GROUPS(simtemp);
+
 /* Module Init / Exit */
 static int __init simtemp_init(void)
 {
     int ret = misc_register(&simtemp_dev);
     if (ret) {
         pr_err("simtemp: failed to register mic device \n");
+        return ret;
+    }
+    ret = sysfs_create_groups(&simtemp_dev.this_device->kobj, simtemp_groups);
+
+    if (ret){
+        misc_deregister(&simtemp_dev);
         return ret;
     }
 
@@ -155,7 +274,9 @@ static void __exit simtemp_exit(void)
 {
     hrtimer_cancel(&simtemp_timer);
     cancel_work_sync(&simtemp_work);
+    sysfs_remove_groups(&simtemp_dev.this_device->kobj, simtemp_groups);
     misc_deregister(&simtemp_dev);
+    del_timer_sync(&sample_timer);
     pr_info("simtemp: module unloaded\n");
 }
 
