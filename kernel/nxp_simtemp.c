@@ -10,6 +10,8 @@
 #include <linux/slab.h>
 #include <linux/random.h> 
 #include <linux/poll.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
 
 #include "nxp_simtemp.h"
 
@@ -39,6 +41,7 @@ static atomic64_t errors = ATOMIC64_INIT(0);
 static unsigned int sampling_ms = DEFAULT_PERIOD_MS;
 
 static struct timer_list sample_timer;
+static struct platform_device *simtemp_pdev;
 
 static void simtemp_generate_sample(struct work_struct *work){
     struct simtemp_sample s;
@@ -244,9 +247,29 @@ static struct attribute *simtemp_attrs[] = {
 
 ATTRIBUTE_GROUPS(simtemp);
 
-/* Module Init / Exit */
-static int __init simtemp_init(void)
-{
+static int simtemp_probe(struct platform_device *pdev){
+    u32 val;
+
+    // Use DT property if available, otherwise keep default
+    if (pdev->dev.of_node) {  // only if DT node exists
+        if (!of_property_read_u32(pdev->dev.of_node, "sampling-ms", &val)) {
+            sampling_ms = val;
+            pr_info("simtemp: sampling-ms from DT = %u ms\n", sampling_ms);
+        } else {
+            pr_info("simtemp: DT property sampling-ms not found, using default %u ms\n", sampling_ms);
+        }
+
+        if (!of_property_read_u32(pdev->dev.of_node, "threshold-mC", &val)) {
+            threshold_mC = val;
+            pr_info("simtemp: threshold-mC from DT = %u mC\n", threshold_mC);
+        } else {
+            pr_info("simtemp: DT property threshold-mC not found, using default %u mC\n", threshold_mC);
+        }
+    } else {
+        pr_info("simtemp: no DT node, using defaults sampling_ms=%u, threshold_mC=%d\n",
+                sampling_ms, threshold_mC);
+    }
+    
     int ret = misc_register(&simtemp_dev);
     if (ret) {
         pr_err("simtemp: failed to register mic device \n");
@@ -266,18 +289,66 @@ static int __init simtemp_init(void)
     hrtimer_init(&simtemp_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
     simtemp_timer.function = simtemp_timer_fn;
     hrtimer_start(&simtemp_timer, ms_to_ktime(sampling_ms), HRTIMER_MODE_REL);
+
     pr_info("simtemp: module loaded, device /dev/%s\n", DEVICE_NAME);
     return 0;
 }
 
-static void __exit simtemp_exit(void)
-{
+static int simtemp_remove(struct platform_device *pdev){
     hrtimer_cancel(&simtemp_timer);
     cancel_work_sync(&simtemp_work);
     sysfs_remove_groups(&simtemp_dev.this_device->kobj, simtemp_groups);
     misc_deregister(&simtemp_dev);
     del_timer_sync(&sample_timer);
     pr_info("simtemp: module unloaded\n");
+    return 0;
+}
+
+static const struct of_device_id simtemp_of_match[] = {
+    { .compatible = "nxp,simtemp" },
+    {},
+};
+MODULE_DEVICE_TABLE(of, simtemp_of_match);
+
+static struct platform_driver simtemp_driver = {
+    .driver = {
+        .name = "simtemp",
+        .owner = THIS_MODULE,
+        .of_match_table = simtemp_of_match,
+    },
+    .probe = simtemp_probe,
+    .remove = simtemp_remove,
+};
+
+/* Module Init / Exit */
+static int __init simtemp_init(void)
+{
+    int ret;
+
+    ret = platform_driver_register(&simtemp_driver);
+    if (ret)
+        return ret;
+
+    simtemp_pdev = platform_device_alloc("simtemp", -1);
+    if (!simtemp_pdev) {
+        platform_driver_unregister(&simtemp_driver);
+        return -ENOMEM;
+    }
+
+    ret = platform_device_add(simtemp_pdev);
+    if (ret) {
+        platform_device_put(simtemp_pdev);
+        platform_driver_unregister(&simtemp_driver);
+        return ret;
+    }
+
+    return 0;
+}
+
+static void __exit simtemp_exit(void)
+{
+    platform_device_unregister(simtemp_pdev);
+    platform_driver_unregister(&simtemp_driver);
 }
 
 module_init(simtemp_init);
