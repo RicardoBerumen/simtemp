@@ -12,8 +12,10 @@
 #include <linux/poll.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/ioctl.h>
 
 #include "nxp_simtemp.h"
+#include "nxp_simtemp_ioctl.h"
 
 #define DEVICE_NAME "simtemp"
 #define FIFO_SIZE 128 //number of samples
@@ -21,6 +23,8 @@
 
 #define SAMPLE_FLAG_NEW   0x01
 #define SAMPLE_FLAG_ALERT 0x02
+
+
 
 // Global Variables
 static DECLARE_KFIFO(sample_fifo, struct simtemp_sample, FIFO_SIZE);
@@ -221,12 +225,49 @@ static __poll_t simtemp_poll(struct file *file, poll_table *wait){
     return mask;
 }
 
+static long simtemp_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
+    struct simtemp_config cfg;
+
+    dev_info("simtemp: ioctl called, cmd=0x%x\n", cmd);
+    
+    switch (cmd){
+        case SIMTEMP_IOC_CONFIG:
+            if (copy_from_user(&cfg, (void __user *)arg, sizeof(cfg))){
+            return -EFAULT;
+            }
+            sampling_ms = cfg.sampling_ms;
+            threshold_mC = cfg.threshold_mC;
+            mode = cfg.mode;
+
+            dev_info("simtemp: config updated via ioctl: sampling=%u, threshold=%u, mode=%u\n",
+                sampling_ms, threshold_mC, mode);
+
+            break;
+        case SIMTEMP_IOC_GETCONF:
+            cfg.sampling_ms = sampling_ms;
+            cfg.threshold_mC = threshold_mC;
+            cfg.mode = mode;
+            if (copy_to_user((void __user *)arg, &cfg, sizeof(cfg)))
+                return -EFAULT;
+            dev_info("simtemp: config read via ioctl\n");
+            break;
+        default:
+            dev_info("simtemp: unknown ioctl cmd=0x%x\n", cmd);
+            return -ENOTTY;
+    }
+    
+    return 0;
+
+
+}
+
 
 
 static const struct file_operations simtemp_fops = {
     .owner = THIS_MODULE,
     .read = simtemp_read,
     .poll = simtemp_poll,
+    .unlocked_ioctl = simtemp_ioctl,
 };
 
 /* Device */
@@ -254,27 +295,30 @@ static int simtemp_probe(struct platform_device *pdev){
     if (pdev->dev.of_node) {  // only if DT node exists
         if (!of_property_read_u32(pdev->dev.of_node, "sampling-ms", &val)) {
             sampling_ms = val;
-            pr_info("simtemp: sampling-ms from DT = %u ms\n", sampling_ms);
+            dev_info("simtemp: sampling-ms from DT = %u ms\n", sampling_ms);
         } else {
-            pr_info("simtemp: DT property sampling-ms not found, using default %u ms\n", sampling_ms);
+            dev_info("simtemp: DT property sampling-ms not found, using default %u ms\n", sampling_ms);
         }
 
         if (!of_property_read_u32(pdev->dev.of_node, "threshold-mC", &val)) {
             threshold_mC = val;
-            pr_info("simtemp: threshold-mC from DT = %u mC\n", threshold_mC);
+            dev_info("simtemp: threshold-mC from DT = %u mC\n", threshold_mC);
         } else {
-            pr_info("simtemp: DT property threshold-mC not found, using default %u mC\n", threshold_mC);
+            dev_info("simtemp: DT property threshold-mC not found, using default %u mC\n", threshold_mC);
         }
     } else {
-        pr_info("simtemp: no DT node, using defaults sampling_ms=%u, threshold_mC=%d\n",
+        dev_info("simtemp: no DT node, using defaults sampling_ms=%u, threshold_mC=%d\n",
                 sampling_ms, threshold_mC);
     }
     
+    // Register misc device
     int ret = misc_register(&simtemp_dev);
     if (ret) {
         pr_err("simtemp: failed to register mic device \n");
         return ret;
     }
+
+    // create sysfs groups
     ret = sysfs_create_groups(&simtemp_dev.this_device->kobj, simtemp_groups);
 
     if (ret){
@@ -290,7 +334,7 @@ static int simtemp_probe(struct platform_device *pdev){
     simtemp_timer.function = simtemp_timer_fn;
     hrtimer_start(&simtemp_timer, ms_to_ktime(sampling_ms), HRTIMER_MODE_REL);
 
-    pr_info("simtemp: module loaded, device /dev/%s\n", DEVICE_NAME);
+    dev_info("simtemp: platform device probed, device /dev/%s\n", DEVICE_NAME);
     return 0;
 }
 
@@ -300,7 +344,7 @@ static int simtemp_remove(struct platform_device *pdev){
     sysfs_remove_groups(&simtemp_dev.this_device->kobj, simtemp_groups);
     misc_deregister(&simtemp_dev);
     del_timer_sync(&sample_timer);
-    pr_info("simtemp: module unloaded\n");
+    dev_info("simtemp: module unloaded\n");
     return 0;
 }
 

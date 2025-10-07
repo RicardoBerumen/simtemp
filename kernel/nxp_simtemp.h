@@ -6,8 +6,8 @@
 /* --- Modes --- */
 enum simtemp_mode {
     MODE_NORMAL = 0,
-    MODE_NOISY,
-    MODE_RAMP,
+    MODE_NOISY = 1,
+    MODE_RAMP = 2,
 };
 
 /* --- Sample struct returned to user --- */
