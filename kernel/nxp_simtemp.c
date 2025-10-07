@@ -30,28 +30,33 @@
 static DECLARE_KFIFO(sample_fifo, struct simtemp_sample, FIFO_SIZE);
 static struct hrtimer simtemp_timer;
 static struct work_struct simtemp_work;
-static wait_queue_head_t read_wq;
+static wait_queue_head_t read_wq; //for blocking reads / poll()
 static DEFINE_MUTEX(fifo_lock);
+
+// attributes
 static int threshold_mC = 45000;
-//static int sampling_ms = 1000; 
-static atomic_t alert_pending = ATOMIC_INIT(0);
+static unsigned int sampling_ms = DEFAULT_PERIOD_MS; 
 static enum simtemp_mode mode = MODE_NORMAL;
-
-
+// alert flag for poll
+static atomic_t alert_pending = ATOMIC_INIT(0);
+// stat counters
 static atomic64_t updates = ATOMIC64_INIT(0);
 static atomic64_t alerts = ATOMIC64_INIT(0);
 static atomic64_t errors = ATOMIC64_INIT(0);
 
-static unsigned int sampling_ms = DEFAULT_PERIOD_MS;
+
 
 static struct timer_list sample_timer;
 static struct platform_device *simtemp_pdev;
 
+
+// timer callback, generating samples
 static void simtemp_generate_sample(struct work_struct *work){
     struct simtemp_sample s;
     static int ramp_val = 40000;
     s.timestamp_ns = ktime_get_ns();
 
+    // generate sample according to mode
     switch (mode)
     {
     case MODE_NORMAL:
@@ -71,17 +76,17 @@ static void simtemp_generate_sample(struct work_struct *work){
         s.temp_mC = 40000 + (get_random_u32() % 10000); // between 40 - 49°C
         break;
     }
-    //s.temp_mC = 40000 + (get_random_u32() % 10000); // between 40 - 49°C
     
-    s.flags = SAMPLE_FLAG_NEW;
+    s.flags = SAMPLE_FLAG_NEW; // new sample flag
     atomic64_inc(&updates);
 
     if (s.temp_mC <= threshold_mC){
-        s.flags |= SAMPLE_FLAG_ALERT;
+        s.flags |= SAMPLE_FLAG_ALERT; // threshold alert
         atomic64_inc(&alerts);
         atomic_set(&alert_pending, 1);
     }
 
+    //pushing sample to fifo, update errors if full
     mutex_lock(&fifo_lock);
     if (!kfifo_is_full(&sample_fifo)){
         kfifo_in(&sample_fifo, &s, 1);
@@ -92,6 +97,8 @@ static void simtemp_generate_sample(struct work_struct *work){
     }
     
     mutex_unlock(&fifo_lock);
+
+    //schedule nex timer
     mod_timer(&sample_timer, jiffies + msecs_to_jiffies(sampling_ms));
 }
 
@@ -174,6 +181,7 @@ static DEVICE_ATTR_RO(stats);
 
 /* File Operations */
 
+
 static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
     struct simtemp_sample sample;
@@ -199,7 +207,8 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
         return -EFAULT;
     }
     mutex_unlock(&fifo_lock);
-
+    
+    // clear alerts once consumed
     if (sample.flags & SAMPLE_FLAG_ALERT){
         atomic_set(&alert_pending, 0);
     }
@@ -217,20 +226,23 @@ static __poll_t simtemp_poll(struct file *file, poll_table *wait){
     poll_wait(file, &read_wq, wait);
 
     if (!kfifo_is_empty(&sample_fifo)){
-        mask |= POLLIN | POLLRDNORM;
+        mask |= POLLIN | POLLRDNORM; // new sample alert
     }
     if (atomic_read(&alert_pending)){
-        mask |= POLLPRI | POLLERR;
+        mask |= POLLPRI | POLLERR; // threshold alert
     }
     return mask;
 }
 
+
+// ioctl for atomic/batch config
 static long simtemp_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
     struct simtemp_config cfg;
 
-    dev_info("simtemp: ioctl called, cmd=0x%x\n", cmd);
+    pr_info("simtemp: ioctl called, cmd=0x%x\n", cmd);
     
     switch (cmd){
+        // reading new config
         case SIMTEMP_IOC_CONFIG:
             if (copy_from_user(&cfg, (void __user *)arg, sizeof(cfg))){
             return -EFAULT;
@@ -239,20 +251,21 @@ static long simtemp_ioctl(struct file *file, unsigned int cmd, unsigned long arg
             threshold_mC = cfg.threshold_mC;
             mode = cfg.mode;
 
-            dev_info("simtemp: config updated via ioctl: sampling=%u, threshold=%u, mode=%u\n",
+            pr_info("simtemp: config updated via ioctl: sampling=%u, threshold=%u, mode=%u\n",
                 sampling_ms, threshold_mC, mode);
 
             break;
+        // writing existing config to request
         case SIMTEMP_IOC_GETCONF:
             cfg.sampling_ms = sampling_ms;
             cfg.threshold_mC = threshold_mC;
             cfg.mode = mode;
             if (copy_to_user((void __user *)arg, &cfg, sizeof(cfg)))
                 return -EFAULT;
-            dev_info("simtemp: config read via ioctl\n");
+            pr_info("simtemp: config read via ioctl\n");
             break;
         default:
-            dev_info("simtemp: unknown ioctl cmd=0x%x\n", cmd);
+            pr_info("simtemp: unknown ioctl cmd=0x%x\n", cmd);
             return -ENOTTY;
     }
     
@@ -262,7 +275,7 @@ static long simtemp_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 }
 
 
-
+// file operations
 static const struct file_operations simtemp_fops = {
     .owner = THIS_MODULE,
     .read = simtemp_read,
@@ -270,7 +283,7 @@ static const struct file_operations simtemp_fops = {
     .unlocked_ioctl = simtemp_ioctl,
 };
 
-/* Device */
+/* Device Registration */
 static struct miscdevice simtemp_dev = {
     .minor = MISC_DYNAMIC_MINOR,
     .name = DEVICE_NAME,
@@ -278,6 +291,8 @@ static struct miscdevice simtemp_dev = {
     .mode = 0666,
 };
 
+
+// sysfs attributes
 static struct attribute *simtemp_attrs[] = {
     &dev_attr_sampling_ms.attr,
     &dev_attr_threshold_mC.attr,
@@ -287,7 +302,7 @@ static struct attribute *simtemp_attrs[] = {
 };
 
 ATTRIBUTE_GROUPS(simtemp);
-
+/* Platform driver & DT Support */
 static int simtemp_probe(struct platform_device *pdev){
     u32 val;
 
@@ -295,19 +310,19 @@ static int simtemp_probe(struct platform_device *pdev){
     if (pdev->dev.of_node) {  // only if DT node exists
         if (!of_property_read_u32(pdev->dev.of_node, "sampling-ms", &val)) {
             sampling_ms = val;
-            dev_info("simtemp: sampling-ms from DT = %u ms\n", sampling_ms);
+            pr_info("simtemp: sampling-ms from DT = %u ms\n", sampling_ms);
         } else {
-            dev_info("simtemp: DT property sampling-ms not found, using default %u ms\n", sampling_ms);
+            pr_info("simtemp: DT property sampling-ms not found, using default %u ms\n", sampling_ms);
         }
 
         if (!of_property_read_u32(pdev->dev.of_node, "threshold-mC", &val)) {
             threshold_mC = val;
-            dev_info("simtemp: threshold-mC from DT = %u mC\n", threshold_mC);
+            pr_info("simtemp: threshold-mC from DT = %u mC\n", threshold_mC);
         } else {
-            dev_info("simtemp: DT property threshold-mC not found, using default %u mC\n", threshold_mC);
+            pr_info("simtemp: DT property threshold-mC not found, using default %u mC\n", threshold_mC);
         }
     } else {
-        dev_info("simtemp: no DT node, using defaults sampling_ms=%u, threshold_mC=%d\n",
+        pr_info("simtemp: no DT node, using defaults sampling_ms=%u, threshold_mC=%d\n",
                 sampling_ms, threshold_mC);
     }
     
@@ -322,7 +337,7 @@ static int simtemp_probe(struct platform_device *pdev){
     ret = sysfs_create_groups(&simtemp_dev.this_device->kobj, simtemp_groups);
 
     if (ret){
-        misc_deregister(&simtemp_dev);
+        misc_deregister(&simtemp_dev); // check for errors
         return ret;
     }
 
@@ -334,20 +349,23 @@ static int simtemp_probe(struct platform_device *pdev){
     simtemp_timer.function = simtemp_timer_fn;
     hrtimer_start(&simtemp_timer, ms_to_ktime(sampling_ms), HRTIMER_MODE_REL);
 
-    dev_info("simtemp: platform device probed, device /dev/%s\n", DEVICE_NAME);
+    pr_info("simtemp: platform device probed, device /dev/%s\n", DEVICE_NAME);
     return 0;
 }
 
 static int simtemp_remove(struct platform_device *pdev){
+    // module unload
     hrtimer_cancel(&simtemp_timer);
     cancel_work_sync(&simtemp_work);
     sysfs_remove_groups(&simtemp_dev.this_device->kobj, simtemp_groups);
     misc_deregister(&simtemp_dev);
     del_timer_sync(&sample_timer);
-    dev_info("simtemp: module unloaded\n");
+    pr_info("simtemp: module unloaded\n");
     return 0;
 }
 
+
+/* Of Match Table for real DT */
 static const struct of_device_id simtemp_of_match[] = {
     { .compatible = "nxp,simtemp" },
     {},

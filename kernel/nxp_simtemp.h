@@ -10,6 +10,7 @@ enum simtemp_mode {
     MODE_RAMP = 2,
 };
 
+//Binary Record
 /* --- Sample struct returned to user --- */
 struct simtemp_sample {
     __u64 timestamp_ns;
