@@ -55,6 +55,8 @@ static void simtemp_generate_sample(struct work_struct *work){
     struct simtemp_sample s;
     static int ramp_val = 40000;
     s.timestamp_ns = ktime_get_ns();
+    
+    
 
     // generate sample according to mode
     switch (mode)
@@ -76,20 +78,23 @@ static void simtemp_generate_sample(struct work_struct *work){
         s.temp_mC = 40000 + (get_random_u32() % 10000); // between 40 - 49°C
         break;
     }
-    
+
+    s.mode_name = mode;
+    //pr_info("simtemp: generated sample %d mC (mode=%d)\n", s.temp_mC, s.mode_name);
     s.flags = SAMPLE_FLAG_NEW; // new sample flag
     atomic64_inc(&updates);
 
-    if (s.temp_mC <= threshold_mC){
+    if (s.temp_mC >= threshold_mC){
         s.flags |= SAMPLE_FLAG_ALERT; // threshold alert
         atomic64_inc(&alerts);
         atomic_set(&alert_pending, 1);
     }
-
+    int ret;
     //pushing sample to fifo, update errors if full
     mutex_lock(&fifo_lock);
     if (!kfifo_is_full(&sample_fifo)){
-        kfifo_in(&sample_fifo, &s, 1);
+        ret = kfifo_in(&sample_fifo, &s, 1);
+        //pr_info("simtemp: kfifo_in returned %d\n", ret);
         wake_up_interruptible(&read_wq);
     } else if (s.flags & SAMPLE_FLAG_ALERT)
     {
@@ -135,7 +140,7 @@ static ssize_t threshold_mC_store(struct device *dev, struct device_attribute *a
     if (kstrtoint(buf, 10, &val)){
         return -EINVAL;
     }
-    if (val < 10 || val > 10000){
+    if (val < 10 || val > 100000){
         return -EINVAL;
     }
     threshold_mC = val;
@@ -204,6 +209,7 @@ static ssize_t simtemp_read(struct file *file, char __user *buf, size_t count, l
     mutex_lock(&fifo_lock);
     if (!kfifo_out(&sample_fifo, &sample, 1)){
         mutex_unlock(&fifo_lock);
+        //pr_info("simtemp: kfifo_out");
         return -EFAULT;
     }
     mutex_unlock(&fifo_lock);
