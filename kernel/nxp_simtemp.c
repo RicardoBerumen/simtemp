@@ -13,6 +13,8 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/ioctl.h>
+#include <linux/ktime.h>
+#include <linux/timekeeping.h>
 
 #include "nxp_simtemp.h"
 #include "nxp_simtemp_ioctl.h"
@@ -23,7 +25,6 @@
 
 #define SAMPLE_FLAG_NEW   0x01
 #define SAMPLE_FLAG_ALERT 0x02
-
 
 
 // Global Variables
@@ -54,7 +55,12 @@ static struct platform_device *simtemp_pdev;
 static void simtemp_generate_sample(struct work_struct *work){
     struct simtemp_sample s;
     static int ramp_val = 40000;
-    s.timestamp_ns = ktime_get_ns();
+    struct timespec64 ts;
+    u64 timestamp_ns;
+
+    ktime_get_real_ts64(&ts);  // fills ts
+    timestamp_ns = ts.tv_sec * 1000000000ULL + ts.tv_nsec;  // assign at runtime
+    s.timestamp_ns = timestamp_ns;
     
     
 
