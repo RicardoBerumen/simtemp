@@ -1,0 +1,7 @@
+*.ko
+*.o
+*.mod.c
+*.symvers
+*.order
+*.pyc
+__pycache__/
