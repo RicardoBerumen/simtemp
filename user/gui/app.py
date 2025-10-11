@@ -1,4 +1,12 @@
 #!/usr/bin/sudo #!/usr/bin/env python3
+
+# GUI for temperature sensor simulator
+# Features
+# Controls sampling period, threshold and mode
+# Read from /dev/simtemp using poll/epoll
+# Live Plot of temperature
+# Code by: Ricardo Berumen
+
 import sys, os, struct, fcntl, threading, time, select
 from PyQt5 import QtWidgets, QtCore
 import pyqtgraph as pg
