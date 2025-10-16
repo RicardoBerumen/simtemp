@@ -4,4 +4,7 @@
 *.symvers
 *.order
 *.pyc
+*.mod
+*.cmd
+*.json
 __pycache__/
