@@ -347,7 +347,11 @@ static int simtemp_probe(struct platform_device *pdev){
 
     // create sysfs groups
     ret = sysfs_create_groups(&simtemp_dev.this_device->kobj, simtemp_groups);
+    struct attribute **attr;
 
+    for (attr = simtemp_group.attrs; *attr; attr++) {
+        sysfs_chmod_file(&simtemp_dev.this_device->kobj, *attr, 0666); //change so you can change without max permissions
+    }
     if (ret){
         misc_deregister(&simtemp_dev); // check for errors
         return ret;

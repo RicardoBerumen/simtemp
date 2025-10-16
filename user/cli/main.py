@@ -1,4 +1,4 @@
-#!/usr/bin/sudo #!/usr/bin/env python3 
+#!/usr/bin/env python3 
 
 # CLI for temperature sensor simulator
 # Features
