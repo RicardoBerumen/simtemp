@@ -30,18 +30,18 @@ values, setting safety limits.
 
 
 ### Using the automated scripts that checks for headers and gives warnings
-    ```bash
+```bash
     chmod +x scripts/build.sh
     ./scripts/build.sh
     sudo insmod nxp_simtemp.ko
-    ```
+```
 
 ### Manually building Kernel Module
-    ```bash
+```bash
     cd kernel
     make
     sudo insmod nxp_simtemp.ko
-    ```
+```
 
 ## Running tools (CLI and GUI)
 Once the device is mounted and `/dev/simtemp` is available, to run the tools you would follow these steps:
