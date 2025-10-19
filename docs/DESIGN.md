@@ -22,23 +22,23 @@ This project demonstrates end-to-end kernel–user communication using standard 
 
 ```mermaid
 flowchart TD
-    subgraph USER [User Space (CLI)]
-        CLI_main[main.py]
-        CLI_poll[select/poll + read() loop]
-        CLI_sysfs[sysfs writes via echo]
+    subgraph USER
+        CLI_main["main.py"]
+        CLI_poll["select/poll + read() loop"]
+        CLI_sysfs["sysfs writes via echo"]
     end
 
-    subgraph KERNEL [SimTemp Kernel Module (nxp_simtemp.ko)]
-        WQ[Workqueue Timer<br>Generates sample<br>Pushes to kfifo]
-        CHAR[Character Device<br>read() / poll()]
-        SYSFS[Sysfs Group<br>/mode<br>/threshold_mC<br>/sampling_ms<br>/stats]
+    subgraph KERNEL
+        WQ["Workqueue Timer: generates sample, pushes to kfifo"]
+        CHAR["Character Device: read / poll"]
+        SYSFS["Sysfs Group: mode, threshold_mC, sampling_ms, stats"]
     end
 
-    subgraph DT [Device Tree / Platform]
-        DT_node[compatible = "nxp,simtemp"]
+    subgraph DT
+        DT_node["compatible = 'nxp,simtemp'"]
     end
 
-    CLI_main -->|poll / read / sysfs| CHAR
+    CLI_main -->|poll / read| CHAR
     CLI_sysfs -->|writes| SYSFS
     WQ --> CHAR
     CHAR -->|read / poll| CLI_main
