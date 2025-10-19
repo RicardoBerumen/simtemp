@@ -1,141 +1,221 @@
 # SimTemp Driver Design
 
-## Overview
-SimTemp is a Linux misc device driver that simulates a temperature sensor.  
-It periodically generates temperature samples and exposes them via a character device (`/dev/simtemp`).
+## 1. Overview
 
-The module supports configurable sampling rate, temperature threshold, and mode via sysfs entries.
+The **SimTemp** driver emulates a temperature sensor that periodically generates synthetic temperature samples in kernel space and exposes them to user space through a character device (`/dev/simtemp`).  
 
----
+It supports:
+- Multiple operating **modes** (`normal`, `noisy`, `ramp`)
+- **Threshold event** signaling
+- **Sysfs attributes** for runtime configuration
+- **Polling** (`poll()`) for non-blocking user notifications
+- A simple **Python CLI** for reading and visualizing samples
 
-## Block Diagram
-
-
-
-  ┌───────────────────────┐
-  │  Device Tree (DTS)    │
-  │-----------------------│
-  │ compatible="nxp,simtemp" │
-  │ sampling-ms=100        │
-  │ threshold-mC=45000     │
-  └───────────┬───────────┘
-              │
-              ▼
-  ┌───────────────────────┐
-  │ Platform Driver Probe │
-  │-----------------------│
-  │ - Reads DT properties │
-  │   (sampling_ms, threshold_mC) │
-  │ - Registers miscdevice (/dev/simtemp) │
-  │ - Creates sysfs entries │
-  │ - Initializes timer & FIFO │
-  └───────────┬───────────┘
-              │
-              ▼
-  ┌─────────────────────────────┐
-  │ Kernel Timer / Workqueue     │
-  │-----------------------------│
-  │ - Generates simulated samples│
-  │ - Sets flags (NEW_SAMPLE / THRESHOLD_CROSSED) │
-  │ - Updates FIFO               │
-  │ - Updates stats (atomic counters) │
-  │ - Wakes waitqueue            │
-  └───────────┬───────────┘
-              │
-              ▼
-  ┌─────────────────────────────┐
-  │ Character Device /dev/simtemp │
-  │-----------------------------│
-  │ File ops: read(), poll(), ioctl() │
-  │ - read(): blocking/nonblocking binary sample │
-  │ - poll(): signals new sample / threshold alert │
-  │ - ioctl(): atomic batch config (sampling_ms, threshold, mode) │
-  └───────────┬───────────┘
-              │
-              ▼
-  ┌─────────────────────────────┐
-  │ Sysfs Entries (/sys/class/...) │
-  │-------------------------------│
-  │ - sampling_ms (RW)             │
-  │ - threshold_mC (RW)            │
-  │ - mode (RW)                    │
-  │ - stats (RO: updates, alerts, errors) │
-  └───────────┬───────────┘
-              │
-              ▼
-  ┌─────────────────────────────┐
-  │ User Space Application      │
-  │-----------------------------│
-  │ - CLI / Python /       │
-  │ - read() samples             │
-  │ - poll()/select()/epoll()    │
-  │ - sysfs configure    │
-  │ - GUI visualization │
-  └─────────────────────────────┘
-
+This project demonstrates end-to-end kernel–user communication using standard Linux interfaces.
 
 ---
 
-## Interaction Flow
+## 2. Architecture
 
-1. **Driver Initialization**
-   - Registers misc device `/dev/simtemp`.
-   - Creates sysfs group for configuration.
-   - Starts workqueue that generates samples every `sampling_ms`.
+### 2.1 Block Diagram
 
-2. **Data Generation**
-   - Workqueue callback generates temperature based on `mode`.
-   - Each sample includes:
-     ```c
-     struct simtemp_sample {
-         __u64 timestamp_ns;
-         __s32 temp_mC;
-         __s16 mode_name;
-         __u32 flags; // bit0=NEW_SAMPLE, bit1=THRESHOLD_CROSSED
-     } __attribute__((packed));
-     ```
-   - Pushed into a `kfifo`.
-   - If threshold crossed → sets bit1 and wakes up readers.
+┌──────────────────────────┐
+│ User Space (CLI) │
+│ - main.py │
+│ - poll() + read() loop │
+│ - sysfs writes via echo │
+└────────────┬─────────────┘
+│
+│ (read/poll/sysfs)
+▼
+┌──────────────────────────┐
+│ SimTemp Kernel Module │
+│ nxp_simtemp.ko │
+│ │
+│ ┌──────────────────────┐ │
+│ │ Workqueue Timer │ │
+│ │ - Generates sample │ │
+│ │ - Pushes to kfifo │ │
+│ └──────────────────────┘ │
+│ │ │
+│ ▼ │
+│ ┌──────────────────────┐ │
+│ │ Character Device │ │
+│ │ - read() │ │
+│ │ - poll() │ │
+│ └──────────────────────┘ │
+│ │
+│ Sysfs Group │
+│ ├── /mode │
+│ ├── /threshold_mC │
+│ └── /sampling_ms │
+| └── /stats │ 
+└──────────────────────────┘
+│
+▼
+┌──────────────────────────┐
+│ Device Tree / Platform │
+│ - compatible = "nxp,simtemp" │
+└──────────────────────────┘
 
-3. **User Space Read**
-   - Python script uses `poll()` on `/dev/simtemp`.
-   - When data available → reads `sizeof(struct simtemp_sample)` bytes.
-   - Unpacks fields and prints timestamp, temperature, mode, and alert.
+### 2.2 Interactions
+**Kernel Side**
+- Timer or workqueue generates a new temperature sample periodically.
+- A struct simptemp_sample is filled with **timestamp**, **temperature**, **mode**, **flags**.
+- Sample is pushed into a kfifo.
+- When a new sample arrives, the `SAMPLE_FLAG_NEW` is set.
+- And the `wake_up_interruptible(&wq)` is called.
+- If the temperature sampled surpasses the threshold, the `SAMPLE_FLAG_ALERT` is set, and serves as an alert event for the user.
 
-4. **Configuration via Sysfs**
-   - `sampling_ms`, `threshold_mC`, `mode` writable via `/sys/class/misc/simtemp/...`.
-   - Example:
-     ```bash
-     echo 100 > /sys/class/misc/simtemp/sampling_ms
-     echo noisy > /sys/class/misc/simtemp/mode
-     ```
+**User side**
+- The CLI opens /dev/simtemp and calls `select()`, `poll()` on the file descriptor.
+- The process is blocked until the kernel signals ready with the corresponding flag.
+- Once `poll()` indicates that data is available, the CLI reads the device to fetch the next sample.
+- It unpacks and prints the fields of the structure.
+- If `SAMPLE_FLAG_ALERT` is set, and alert message is printed, as well as the test is completed.
+
+**Control Flow**
+Sysfs attributes act as control knobs for the runtime configuration.
+- `mode` : controls the behaviour of the sensor.
+- `threshold_mC`: sets the threshold for the temperature.
+- `sampling_ms`: controls how often the samples are generated.
+The CLI writes to these files in `/sys/class/misc/simtemp`to configure the driver before starting the readings.
+The GUI, on the other side, can write to these files on the fly, just using the configuration set and the button pressed.
+
+**Signals**
+**Signal**               - **Direction**              - **Purpose**
+`wait_queue + poll()`    - Kernel -> User       - Notify CLI/GUI of new data
+
+`kfifo`                  - Kernel -> User       - Shared buffer for sample data
+
+`sysfs`                  - User -> Kernel       - Config and mode control
+
+`flags`                  - Kernel -> User       - Encodes event state and alerts CLI/GUI
 
 ---
 
-## Locking Model
-| Mechanism | Used For | Reason |
-|------------|-----------|--------|
-| **spinlock_t** | Protects `kfifo` access | FIFO accessed from both workqueue and user read context; must not sleep. |
-| **mutex** | Not used | Sysfs writes are serialized automatically; no long critical sections. |
+## 3. API Contract
+
+### 3.1 Character Device (`/dev/simtemp`)
+
+**Interface**: character device (misc)  
+**Purpose**: data path for streaming samples  
+**IOCTLs**: sampling_ms, threshold_mC, mode -> Not actively in use (prefered to use sysfs) 
+**Read semantics**:
+- Blocks until a new sample is available (unless O_NONBLOCK)
+- Each `read()` returns one packed struct:
+
+```c
+struct simtemp_sample {
+    __u64 timestamp_ns;   /* CLOCK_REALTIME */
+    __s32 temp_mC;        /* milli-Celsius */
+    __s16 mode_name;      /* 0=normal,1=noisy,2=ramp */
+    __u32 flags;          /* bit0=NEW_SAMPLE, bit1=THRESHOLD_CROSSED */
+} __attribute__((packed));
+```
+
+**Polling** `poll()` wakes when a new sample is inserted in the fifo.
+
+### 3.2 Control event selection
+SimTemp uses **sysfs** for configuration and control, mainly due to sysfs providing a **standardized, discoverable, and user-friendly**
+**interface** for device configuration. Each attribute (e.g., `/sys/class/misc/simtemp/sampling_ms`) maps cleanly to a kernel variable, 
+allowing users and scripts to inspect or modify parameters using simple shell tools (`cat`, `echo`, etc.) without requiring custom binaries.
+With it's main advantages being:
+- Transparency, plain text files.
+- Standardization in Linux model device conventions.
+- Safety, clear access semantics.
+- Ease of automation with shell scripts.
+
+In summary, sysfs is a better decision in the beginning, due to its safety and ease of use in linux devices, although it can be eventually
+swapped out once the device needs more complexity or upscaling.
+
+
+### 3.3 Sysfs Interfaces
+Located under `/sys/class/misc/simtemp/`.
+**mode**         - RW - Select generation mode (`normal`, `noisy`, `ramp`).
+**threshold_mC** - RW - Set alert threshold (in millicelsius).
+**sampling_ms**  - RW - Set sampling interval (in milliseconds).
+**stats**        - RO - Publishes count of updates, alerts, and errors.
+
+### 3.4 Events and Flags
+Flags inside each `simtemp_sample` indicate:
+**0x01**         - SAMPLE_FLAG_NEW   - Set when new valid data.
+**0x02**         - SAMPLE_FLAG_ALERT - Set when threshold_mC exceeded.
+
+### 3.5 User-space Contact
+The python CLI inside `main.py`:
+**1.-** Opens `/dev/simtemp`.
+**2.-** Uses `select.poll()` to wait for readeable events.
+**3.-** Reads variable-size packets in case some of the data is separated.
+**4.-** Unpacks the struct using `("<Q i h I")`.
+**5.-** Sets sysfs knobs (if indicated).
+**6.-** Prints the samples and their timestamp.
 
 ---
 
-## API Design Choices
+## 4. Threading and Locking Model
 
-| Feature | Chosen API | Rationale |
-|----------|-------------|-----------|
-| Sampling rate, threshold, mode | **sysfs** | Simple configuration, human-readable |
-| Sample data | **/dev/simtemp** | Binary structured data suited for poll-based reads |
-| Event notification | **poll()** | Efficient, standard mechanism for user-space waiting |
+### 4.1 Workqueue Timer Thread
+The driver uses a **delayed workqueue** to periodically generate temperature samples.
+Each iteration:
+1. Computes a new synthetic temperature value based on the current mode.
+2. Pushes the sample into a kernel FIFO (`kfifo_in()`).
+3. Wakes up any user-space readers waiting via `poll()`.
+
+
+### 4.2 Concurrency Control
+
+| Resource | Protection | Reason |
+|-----------|-------------|--------|
+| `kfifo` | `spinlock_t fifo_lock` | Accessed concurrently from the workqueue (producer) and the `read()` handler (consumer). |
+| `mode`, `threshold_mC`, `sampling_ms` | `mutex` (`config_lock`) | Modified through sysfs, which can sleep — safe to use mutex. |
+| `wait_queue_head_t read_queue` | Wait queue | Synchronizes blocking readers with the producer thread. |
+
+### 4.3 Locking Rationale
+- **Spinlocks** are chosen for the FIFO path to ensure minimal latency inside atomic or softirq context (short critical sections).  
+- **Mutexes** are used for sysfs writes because they occur in process context and may block.  
+- **Wait queues** efficiently block user threads until new samples are available, avoiding busy-waiting.
 
 ---
 
-## Device Tree Integration
+## 5. Device Tree (DT) Mapping
 
-Example node:
+The driver supports both static and Device Tree–based instantiation.
+
+### 5.1 DT Example Node
+The structure of the DT used is:
 ```dts
-simtemp@0 {
+simtemp0: simtemp@0 {
     compatible = "nxp,simtemp";
     sampling-ms = <200>;
-    threshold-mC = <50000>;
+    threshold-mC = <45000>;
+    status = "okay";
 };
+```
+
+### 5.2 DT -> Probe() Mapping
+The mapping of the DT values inside the kernels and the defaults used in case DT entry was not found are as follows:
+**DT Property**      - **Kernel Field**   - **Default**
+`sampling-ms`        - `sampling_ms`      - `100 ms`
+`threshold-mC`       - `threshold_mC`     - `45000 mC`
+
+
+## 6. Scaling and Performance
+At **10 kHz sampling**, several limitations emerge.
+### 6.1 Subsystem Limitations
+**Subsystem**  - **Limitation**              - **Effect**
+`kfifo`        - User space cannot drain     - FIFO overflow, lost samples
+                 fast enough
+`workqueue`    - Latency / jitter from       - Missed or delayed samples
+                 scheduler
+`poll()`       - Frequent wakeups            - High context-switch overhead
+
+`sysfs`        - Slow for high-rate writes   - Not critical, but lags
+
+## 6.2 Mitigation Strategies
+- Implement batch reads (`read()` multiple times per call)
+- Expose an mmap ring buffer for near zero-copy access.
+- Use RT scheduling or per-CPU worker for precise timing.
+- Add backpressure counters for overflow detection.
+- Increase FIFO depth cautiously to handle bursts.
+- Use **ioctl** for control and configuration in the CLI/GUI space, and test more extensively the kernel implementation.
