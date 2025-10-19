@@ -19,44 +19,28 @@ This project demonstrates end-to-end kernel–user communication using standard 
 
 ### 2.1 Block Diagram
 
-┌──────────────────────────┐
-│ User Space (CLI) │
-│ - main.py │
-│ - poll() + read() loop │
-│ - sysfs writes via echo │
-└────────────┬─────────────┘
-│
-│ (read/poll/sysfs)
-▼
-┌──────────────────────────┐
-│ SimTemp Kernel Module │
-│ nxp_simtemp.ko │
-│ │
-│ ┌──────────────────────┐ │
-│ │ Workqueue Timer │ │
-│ │ - Generates sample │ │
-│ │ - Pushes to kfifo │ │
-│ └──────────────────────┘ │
-│ │ │
-│ ▼ │
-│ ┌──────────────────────┐ │
-│ │ Character Device │ │
-│ │ - read() │ │
-│ │ - poll() │ │
-│ └──────────────────────┘ │
-│ │
-│ Sysfs Group │
-│ ├── /mode │
-│ ├── /threshold_mC │
-│ └── /sampling_ms │
-| └── /stats │ 
-└──────────────────────────┘
-│
-▼
-┌──────────────────────────┐
-│ Device Tree / Platform │
-│ - compatible = "nxp,simtemp" │
-└──────────────────────────┘
+
+```mermaid
+flowchart TD
+    A[User Space (CLI)] -->|read / poll / sysfs| B[SimTemp Kernel Module]
+
+    A -->|sysfs writes via echo| B
+
+    B --> C[Workqueue Timer]
+    C -->|generates sample, pushes to kfifo| D[Character Device]
+    
+    D -->|read() / poll()| A
+
+    B --> E[Sysfs Group]
+    E -->|attributes| A
+    E --> /mode
+    E --> /threshold_mC
+    E --> /sampling_ms
+    E --> /stats
+
+    B --> F[Device Tree / Platform]
+    F -->|compatible = "nxp,simtemp"| B
+```
 
 ### 2.2 Interactions
 **Kernel Side**
@@ -84,6 +68,7 @@ The GUI, on the other side, can write to these files on the fly, just using the 
 
 **Signals**
 **Signal**               - **Direction**              - **Purpose**
+
 `wait_queue + poll()`    - Kernel -> User       - Notify CLI/GUI of new data
 
 `kfifo`                  - Kernel -> User       - Shared buffer for sample data
@@ -196,21 +181,25 @@ simtemp0: simtemp@0 {
 ### 5.2 DT -> Probe() Mapping
 The mapping of the DT values inside the kernels and the defaults used in case DT entry was not found are as follows:
 **DT Property**      - **Kernel Field**   - **Default**
+
 `sampling-ms`        - `sampling_ms`      - `100 ms`
+
 `threshold-mC`       - `threshold_mC`     - `45000 mC`
 
 
 ## 6. Scaling and Performance
 At **10 kHz sampling**, several limitations emerge.
 ### 6.1 Subsystem Limitations
-**Subsystem**  - **Limitation**              - **Effect**
-`kfifo`        - User space cannot drain     - FIFO overflow, lost samples
-                 fast enough
-`workqueue`    - Latency / jitter from       - Missed or delayed samples
-                 scheduler
-`poll()`       - Frequent wakeups            - High context-switch overhead
+**Subsystem**  - **Limitation**                       - **Effect**
 
-`sysfs`        - Slow for high-rate writes   - Not critical, but lags
+`kfifo`        - User space cannot drain fast enough  - FIFO overflow, lost samples
+
+`workqueue`    - Latency / jitter from scheduler      - Missed or delayed samples
+                 
+
+`poll()`       - Frequent wakeups                     - High context-switch overhead
+
+`sysfs`        - Slow for high-rate writes            - Not critical, but lags
 
 ## 6.2 Mitigation Strategies
 - Implement batch reads (`read()` multiple times per call)

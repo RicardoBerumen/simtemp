@@ -54,7 +54,7 @@ Once the device is mounted and `/dev/simtemp` is available, to run the tools you
     python3 user/cli/main.py --sampling 1 --threshold 42000 --mode noisy #change sysfs configs
 ```
 
-### CLI
+### GUI
 ```bash
     pip install user/cli/requirements.txt
     python3 user/gui/app.py
