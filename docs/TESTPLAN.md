@@ -1,7 +1,7 @@
-# TESTPLAN.md — SimTemp Project
+# SimTemp Driver Test Plan
 
 ## 1. Overview
-This document describes the verification and validation steps for the **SimTemp kernel module** and **userspace CLI & GUI**.  
+This document describes the verification and validation steps for the **SimTemp kernel module** and **userspace CLI**.  
 The goal is to ensure correct operation, stability, and compliance with the design requirements across configuration, data reporting, and alerting functions.
 
 ---
