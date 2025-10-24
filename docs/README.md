@@ -21,8 +21,9 @@ values, setting safety limits.
 
 ## Demo & Repository
 
-- **Video demonstration:** (link)
-- **GitHub repository:** [RicardoBerumen/simtemp](https://github.com/RicardoBerumen/simtemp)  
+  
+- **GitHub Repository:** [RicardoBerumen/simtemp](https://github.com/RicardoBerumen/simtemp)
+- **Video demonstration:** [Demo Video](https://youtu.be/FF23g-jkIHg)
 
 ---
 
